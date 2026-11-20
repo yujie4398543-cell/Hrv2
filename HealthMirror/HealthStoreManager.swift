@@ -7,6 +7,7 @@ import Combine
 final class HealthStoreManager: ObservableObject {
 
     @Published var heartRate: Double?
+    @Published var restingHeartRate: Double?
     @Published var steps: Double?
     @Published var distance: Double?
     @Published var hrv: Double?
@@ -26,6 +27,7 @@ final class HealthStoreManager: ObservableObject {
 
         let identifiers: [HKQuantityTypeIdentifier] = [
             .heartRate,
+            .restingHeartRate,
             .stepCount,
             .distanceWalkingRunning,
             .heartRateVariabilitySDNN,
@@ -36,7 +38,9 @@ final class HealthStoreManager: ObservableObject {
         ]
 
         for identifier in identifiers {
-            if let type = HKObjectType.quantityType(forIdentifier: identifier) {
+            if let type = HKObjectType.quantityType(
+                forIdentifier: identifier
+            ) {
                 types.insert(type)
             }
         }
@@ -50,9 +54,33 @@ final class HealthStoreManager: ObservableObject {
         return types
     }
 
+    // MARK: - 页面兼容接口
+
+    func requestAccessAndRefresh() async {
+        await requestAuthorization()
+    }
+
+    func value(_ number: Double?, suffix: String) -> String {
+        guard let number, number.isFinite else {
+            return "--"
+        }
+
+        let formatted: String
+
+        if number.rounded() == number {
+            formatted = String(format: "%.0f", number)
+        } else {
+            formatted = String(format: "%.1f", number)
+        }
+
+        return "\(formatted) \(suffix)"
+    }
+
+    // MARK: - HealthKit Authorization
+
     func requestAuthorization() async {
         guard HKHealthStore.isHealthDataAvailable() else {
-            errorMessage = "此设备不支持 Apple 健康数据。"
+            errorMessage = "此设备不支持 Apple 健康数据"
             return
         }
 
@@ -64,10 +92,13 @@ final class HealthStoreManager: ObservableObject {
 
             isAuthorized = true
             await refresh()
+
         } catch {
             errorMessage = "健康数据授权失败：\(error.localizedDescription)"
         }
     }
+
+    // MARK: - Refresh Data
 
     func refresh() async {
         guard HKHealthStore.isHealthDataAvailable() else {
@@ -77,9 +108,18 @@ final class HealthStoreManager: ObservableObject {
         isLoading = true
         errorMessage = nil
 
+        let rateUnit = HKUnit.count().unitDivided(
+            by: HKUnit.minute()
+        )
+
         async let heart = fetchLatest(
             .heartRate,
-            unit: HKUnit.count().unitDivided(by: HKUnit.minute())
+            unit: rateUnit
+        )
+
+        async let resting = fetchLatest(
+            .restingHeartRate,
+            unit: rateUnit
         )
 
         async let step = fetchCumulative(
@@ -104,7 +144,7 @@ final class HealthStoreManager: ObservableObject {
 
         async let breathing = fetchLatest(
             .respiratoryRate,
-            unit: HKUnit.count().unitDivided(by: HKUnit.minute())
+            unit: rateUnit
         )
 
         async let wristTemp = fetchLatest(
@@ -119,6 +159,7 @@ final class HealthStoreManager: ObservableObject {
 
         let results = await (
             heart,
+            resting,
             step,
             walkDistance,
             heartVariability,
@@ -129,22 +170,22 @@ final class HealthStoreManager: ObservableObject {
         )
 
         heartRate = results.0
-        steps = results.1
-        distance = results.2
-        hrv = results.3
+        restingHeartRate = results.1
+        steps = results.2
+        distance = results.3
+        hrv = results.4
 
-        if let value = results.4 {
-            oxygen = value * 100
-        } else {
-            oxygen = nil
-        }
+        // HealthKit 血氧原始值为 0～1，转换为百分比
+        oxygen = results.5.map { $0 * 100 }
 
-        respiratoryRate = results.5
-        wristTemperature = results.6
-        activeEnergy = results.7
+        respiratoryRate = results.6
+        wristTemperature = results.7
+        activeEnergy = results.8
 
         isLoading = false
     }
+
+    // MARK: - Latest Sample
 
     private func fetchLatest(
         _ identifier: HKQuantityTypeIdentifier,
@@ -158,6 +199,7 @@ final class HealthStoreManager: ObservableObject {
         }
 
         return await withCheckedContinuation { continuation in
+
             let sort = NSSortDescriptor(
                 key: HKSampleSortIdentifierEndDate,
                 ascending: false
@@ -177,14 +219,15 @@ final class HealthStoreManager: ObservableObject {
                     return
                 }
 
-                continuation.resume(
-                    returning: sample.quantity.doubleValue(for: unit)
-                )
+                let result = sample.quantity.doubleValue(for: unit)
+                continuation.resume(returning: result)
             }
 
             healthStore.execute(query)
         }
     }
+
+    // MARK: - Daily Cumulative Data
 
     private func fetchCumulative(
         _ identifier: HKQuantityTypeIdentifier,
@@ -207,6 +250,7 @@ final class HealthStoreManager: ObservableObject {
         )
 
         return await withCheckedContinuation { continuation in
+
             let query = HKStatisticsQuery(
                 quantityType: type,
                 quantitySamplePredicate: predicate,
@@ -220,9 +264,8 @@ final class HealthStoreManager: ObservableObject {
                     return
                 }
 
-                continuation.resume(
-                    returning: quantity.doubleValue(for: unit)
-                )
+                let result = quantity.doubleValue(for: unit)
+                continuation.resume(returning: result)
             }
 
             healthStore.execute(query)
