@@ -1,0 +1,27 @@
+name: HealthMirror
+options:
+  bundleIdPrefix: app.healthmirror
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    TARGETED_DEVICE_FAMILY: "1"
+targets:
+  HealthMirror:
+    type: application
+    platform: iOS
+    sources:
+      - path: HealthMirror
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.healthmirror.personal
+        PRODUCT_NAME: HealthMirror
+        INFOPLIST_KEY_CFBundleDisplayName: HealthMirror
+        INFOPLIST_KEY_NSHealthShareUsageDescription: "用于读取你授权的 Apple 健康指标，并在本机展示。"
+        INFOPLIST_KEY_NSMotionUsageDescription: "用于在 Apple 健康步数不可用时读取本机计步数据。"
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_ENTITLEMENTS: HealthMirror/HealthMirror.entitlements
+        SWIFT_EMIT_LOC_STRINGS: YES
