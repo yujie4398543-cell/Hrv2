@@ -22,6 +22,8 @@ final class HealthStoreManager: ObservableObject {
 
     private let healthStore = HKHealthStore()
 
+    // MARK: - HealthKit Read Types
+
     private var readTypes: Set<HKObjectType> {
         var types = Set<HKObjectType>()
 
@@ -54,24 +56,24 @@ final class HealthStoreManager: ObservableObject {
         return types
     }
 
-    // MARK: - 页面兼容接口
+    // MARK: - Compatibility Methods
 
     func requestAccessAndRefresh() async {
         await requestAuthorization()
     }
 
-    func value(_ number: Double?, suffix: String) -> String {
+    func value(
+        _ number: Double?,
+        suffix: String,
+        decimals: Int = 0
+    ) -> String {
         guard let number, number.isFinite else {
             return "--"
         }
 
-        let formatted: String
-
-        if number.rounded() == number {
-            formatted = String(format: "%.0f", number)
-        } else {
-            formatted = String(format: "%.1f", number)
-        }
+        let safeDecimals = min(max(decimals, 0), 4)
+        let format = "%.\(safeDecimals)f"
+        let formatted = String(format: format, number)
 
         return "\(formatted) \(suffix)"
     }
@@ -175,7 +177,7 @@ final class HealthStoreManager: ObservableObject {
         distance = results.3
         hrv = results.4
 
-        // HealthKit 血氧原始值为 0～1，转换为百分比
+        // HealthKit 血氧值转换为百分比
         oxygen = results.5.map { $0 * 100 }
 
         respiratoryRate = results.6
@@ -185,7 +187,7 @@ final class HealthStoreManager: ObservableObject {
         isLoading = false
     }
 
-    // MARK: - Latest Sample
+    // MARK: - Fetch Latest Sample
 
     private func fetchLatest(
         _ identifier: HKQuantityTypeIdentifier,
@@ -227,7 +229,7 @@ final class HealthStoreManager: ObservableObject {
         }
     }
 
-    // MARK: - Daily Cumulative Data
+    // MARK: - Fetch Daily Cumulative Data
 
     private func fetchCumulative(
         _ identifier: HKQuantityTypeIdentifier,
