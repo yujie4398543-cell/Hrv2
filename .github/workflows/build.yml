@@ -1,23 +1,45 @@
 
-name: Build unsigned iOS IPA
+name: Build HealthMirror IPA
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-15
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v5
 
-      - name: Show project files
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build iOS app
         run: |
-          echo "Repository contents:"
-          ls -la
-          echo "HealthMirror contents:"
-          find . -maxdepth 3 -type f
+          xcodebuild \
+            -project HealthMirror.xcodeproj \
+            -scheme HealthMirror \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            build
 
-      - name: Check Xcode
-        run: xcodebuild -version
+      - name: Package unsigned IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/HealthMirror.app Payload/
+          mkdir -p artifacts
+          /usr/bin/zip -r artifacts/HealthMirror-unsigned.ipa Payload
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: HealthMirror-unsigned-ipa
+          path: artifacts/HealthMirror-unsigned.ipa
+          if-no-files-found: error
