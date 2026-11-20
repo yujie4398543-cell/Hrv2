@@ -16,6 +16,9 @@ final class HealthStoreManager: ObservableObject {
     @Published var wristTemperature: Double?
     @Published var activeEnergy: Double?
 
+    // 睡眠时长，单位：小时
+    @Published var sleepHours: Double?
+
     @Published var isAuthorized = false
     @Published var isLoading = false
     @Published var errorMessage: String?
@@ -159,6 +162,9 @@ final class HealthStoreManager: ObservableObject {
             unit: HKUnit.kilocalorie()
         )
 
+        // 获取最近24小时的睡眠时长
+        async let sleep = fetchSleepDuration()
+
         let results = await (
             heart,
             resting,
@@ -168,7 +174,8 @@ final class HealthStoreManager: ObservableObject {
             bloodOxygen,
             breathing,
             wristTemp,
-            energy
+            energy,
+            sleep
         )
 
         heartRate = results.0
@@ -177,17 +184,18 @@ final class HealthStoreManager: ObservableObject {
         distance = results.3
         hrv = results.4
 
-        // HealthKit 血氧值转换为百分比
+        // HealthKit 血氧原始值转换为百分比
         oxygen = results.5.map { $0 * 100 }
 
         respiratoryRate = results.6
         wristTemperature = results.7
         activeEnergy = results.8
+        sleepHours = results.9
 
         isLoading = false
     }
 
-    // MARK: - Fetch Latest Sample
+    // MARK: - Fetch Latest Quantity Sample
 
     private func fetchLatest(
         _ identifier: HKQuantityTypeIdentifier,
@@ -268,6 +276,77 @@ final class HealthStoreManager: ObservableObject {
 
                 let result = quantity.doubleValue(for: unit)
                 continuation.resume(returning: result)
+            }
+
+            healthStore.execute(query)
+        }
+    }
+
+    // MARK: - Fetch Sleep Duration
+
+    private func fetchSleepDuration() async -> Double? {
+
+        guard let sleepType = HKObjectType.categoryType(
+            forIdentifier: .sleepAnalysis
+        ) else {
+            return nil
+        }
+
+        // 查询最近24小时的睡眠记录
+        let endDate = Date()
+        let startDate = Calendar.current.date(
+            byAdding: .hour,
+            value: -24,
+            to: endDate
+        ) ?? endDate.addingTimeInterval(-86400)
+
+        let predicate = HKQuery.predicateForSamples(
+            withStart: startDate,
+            end: endDate,
+            options: []
+        )
+
+        return await withCheckedContinuation { continuation in
+
+            let query = HKSampleQuery(
+                sampleType: sleepType,
+                predicate: predicate,
+                limit: HKObjectQueryNoLimit,
+                sortDescriptors: nil
+            ) { _, samples, error in
+
+                guard error == nil,
+                      let sleepSamples = samples as? [HKCategorySample]
+                else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                // 只统计睡眠状态，不统计清醒和仅在床状态
+                let asleepValues: Set<Int> = [
+                    HKCategoryValueSleepAnalysis.asleep.rawValue,
+                    HKCategoryValueSleepAnalysis.asleepUnspecified.rawValue,
+                    HKCategoryValueSleepAnalysis.asleepCore.rawValue,
+                    HKCategoryValueSleepAnalysis.asleepDeep.rawValue,
+                    HKCategoryValueSleepAnalysis.asleepREM.rawValue
+                ]
+
+                let totalSeconds = sleepSamples
+                    .filter {
+                        asleepValues.contains($0.value)
+                    }
+                    .reduce(0.0) { total, sample in
+                        let duration = sample.endDate.timeIntervalSince(
+                            sample.startDate
+                        )
+                        return total + max(duration, 0)
+                    }
+
+                let hours = totalSeconds / 3600.0
+
+                continuation.resume(
+                    returning: totalSeconds > 0 ? hours : nil
+                )
             }
 
             healthStore.execute(query)
