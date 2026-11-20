@@ -38,7 +38,7 @@ jobs:
           /usr/bin/zip -r artifacts/HealthMirror-unsigned.ipa Payload
 
       - name: Upload IPA
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: HealthMirror-unsigned-ipa
           path: artifacts/HealthMirror-unsigned.ipa
