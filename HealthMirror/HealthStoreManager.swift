@@ -1,112 +1,231 @@
+
 import Foundation
-import Combine
 import HealthKit
-import CoreMotion
+import Combine
 
 @MainActor
 final class HealthStoreManager: ObservableObject {
-    @Published var authorizationAvailable = HKHealthStore.isHealthDataAvailable()
-    @Published var lastUpdated: Date?
-    @Published var steps: Double?
-    @Published var walkingDistance: Double?
+
     @Published var heartRate: Double?
-    @Published var restingHeartRate: Double?
+    @Published var steps: Double?
+    @Published var distance: Double?
     @Published var hrv: Double?
     @Published var oxygen: Double?
     @Published var respiratoryRate: Double?
     @Published var wristTemperature: Double?
-    @Published var sleepHours: Double?
     @Published var activeEnergy: Double?
+
+    @Published var isAuthorized = false
+    @Published var isLoading = false
     @Published var errorMessage: String?
 
-    private let store = HKHealthStore()
-    private let motion = CMPedometer()
+    private let healthStore = HKHealthStore()
 
     private var readTypes: Set<HKObjectType> {
+        var types = Set<HKObjectType>()
+
         let identifiers: [HKQuantityTypeIdentifier] = [
-            .stepCount, .distanceWalkingRunning, .heartRate,
-            .restingHeartRate, .heartRateVariabilitySDNN,
-            .oxygenSaturation, .respiratoryRate, .appleSleepingWristTemperature,
+            .heartRate,
+            .stepCount,
+            .distanceWalkingRunning,
+            .heartRateVariabilitySDNN,
+            .oxygenSaturation,
+            .respiratoryRate,
+            .appleSleepingWristTemperature,
             .activeEnergyBurned
         ]
-        var result = Set<HKObjectType>()
-        identifiers.forEach {
-            if let type = HKObjectType.quantityType(forIdentifier: $0) { result.insert(type) }
+
+        for identifier in identifiers {
+            if let type = HKObjectType.quantityType(forIdentifier: identifier) {
+                types.insert(type)
+            }
         }
-        if let sleep = HKObjectType.categoryType(forIdentifier: .sleepAnalysis) { result.insert(sleep) }
-        return result
+
+        if let sleep = HKObjectType.categoryType(
+            forIdentifier: .sleepAnalysis
+        ) {
+            types.insert(sleep)
+        }
+
+        return types
     }
 
-    func requestAccessAndRefresh() async {
+    func requestAuthorization() async {
         guard HKHealthStore.isHealthDataAvailable() else {
             errorMessage = "此设备不支持 Apple 健康数据。"
             return
         }
+
         do {
-            try await store.requestAuthorization(toShare: [], read: readTypes)
+            try await healthStore.requestAuthorization(
+                toShare: [],
+                read: readTypes
+            )
+
+            isAuthorized = true
             await refresh()
         } catch {
-            errorMessage = "无法请求健康数据权限：\(error.localizedDescription)"
+            errorMessage = "健康数据授权失败：\(error.localizedDescription)"
         }
     }
 
     func refresh() async {
-        async let s: Void = load(.stepCount, unit: .count) { steps = $0 }
-        async let d: Void = load(.distanceWalkingRunning, unit: .meter) { walkingDistance = $0 }
-        async let hr: Void = load(.heartRate, unit: HKUnit.count().unitDivided(by: .minute)) { heartRate = $0 }
-        async let rhr: Void = load(.restingHeartRate, unit: HKUnit.count().unitDivided(by: .minute)) { restingHeartRate = $0 }
-        async let variability: Void = load(.heartRateVariabilitySDNN, unit: .secondUnit(with: .milli)) { hrv = $0 }
-        async let o2: Void = load(.oxygenSaturation, unit: .percent()) { oxygen = $0 * 100 }
-        async let rr: Void = load(.respiratoryRate, unit: HKUnit.count().unitDivided(by: .minute)) { respiratoryRate = $0 }
-        async let temp: Void = load(.appleSleepingWristTemperature, unit: .degreeCelsius()) { wristTemperature = $0 }
-        async let energy: Void = load(.activeEnergyBurned, unit: .kilocalorie()) { activeEnergy = $0 }
-        async let sleep: Void = loadSleep()
-        _ = await (s,d,hr,rhr,variability,o2,rr,temp,energy,sleep)
-        lastUpdated = Date()
-        loadPedometerFallback()
-    }
-
-    private func load(_ id: HKQuantityTypeIdentifier, unit: HKUnit, assign: @escaping (Double?) -> Void) async {
-        guard let type = HKObjectType.quantityType(forIdentifier: id) else { assign(nil); return }
-        let start = Calendar.current.startOfDay(for: Date())
-        let predicate = HKQuery.predicateForSamples(withStart: start, end: Date(), options: .strictStartDate)
-        let descriptor = HKStatisticsQueryDescriptor(predicate: HKSamplePredicate.quantitySample(type: type, predicate: predicate),
-                                                      options: .mostRecent)
-        do {
-            let result = try await descriptor.result(for: store)
-            assign(result?.mostRecentQuantity()?.doubleValue(for: unit))
-        } catch { assign(nil) }
-    }
-
-    private func loadSleep() async {
-        guard let type = HKObjectType.categoryType(forIdentifier: .sleepAnalysis) else { return }
-        let start = Calendar.current.date(byAdding: .day, value: -1, to: Date()) ?? Date()
-        let predicate = HKQuery.predicateForSamples(withStart: start, end: Date(), options: [])
-        let query = HKSampleQuery(sampleType: type, predicate: predicate, limit: HKObjectQueryNoLimit,
-                                  sortDescriptors: nil) { [weak self] _, samples, _ in
-            let total = (samples as? [HKCategorySample] ?? [])
-                .filter { $0.value == HKCategoryValueSleepAnalysis.asleepUnspecified.rawValue ||
-                          $0.value == HKCategoryValueSleepAnalysis.asleepCore.rawValue ||
-                          $0.value == HKCategoryValueSleepAnalysis.asleepDeep.rawValue ||
-                          $0.value == HKCategoryValueSleepAnalysis.asleepREM.rawValue }
-                .reduce(0.0) { $0 + $1.endDate.timeIntervalSince($1.startDate) }
-            Task { @MainActor in self?.sleepHours = total > 0 ? total / 3600 : nil }
+        guard HKHealthStore.isHealthDataAvailable() else {
+            return
         }
-        store.execute(query)
+
+        isLoading = true
+        errorMessage = nil
+
+        async let heart = fetchLatest(
+            .heartRate,
+            unit: HKUnit.count().unitDivided(by: HKUnit.minute())
+        )
+
+        async let step = fetchCumulative(
+            .stepCount,
+            unit: HKUnit.count()
+        )
+
+        async let walkDistance = fetchCumulative(
+            .distanceWalkingRunning,
+            unit: HKUnit.meter()
+        )
+
+        async let heartVariability = fetchLatest(
+            .heartRateVariabilitySDNN,
+            unit: HKUnit.secondUnit(with: .milli)
+        )
+
+        async let bloodOxygen = fetchLatest(
+            .oxygenSaturation,
+            unit: HKUnit.percent()
+        )
+
+        async let breathing = fetchLatest(
+            .respiratoryRate,
+            unit: HKUnit.count().unitDivided(by: HKUnit.minute())
+        )
+
+        async let wristTemp = fetchLatest(
+            .appleSleepingWristTemperature,
+            unit: HKUnit.degreeCelsius()
+        )
+
+        async let energy = fetchCumulative(
+            .activeEnergyBurned,
+            unit: HKUnit.kilocalorie()
+        )
+
+        let results = await (
+            heart,
+            step,
+            walkDistance,
+            heartVariability,
+            bloodOxygen,
+            breathing,
+            wristTemp,
+            energy
+        )
+
+        heartRate = results.0
+        steps = results.1
+        distance = results.2
+        hrv = results.3
+
+        if let value = results.4 {
+            oxygen = value * 100
+        } else {
+            oxygen = nil
+        }
+
+        respiratoryRate = results.5
+        wristTemperature = results.6
+        activeEnergy = results.7
+
+        isLoading = false
     }
 
-    private func loadPedometerFallback() {
-        guard CMPedometer.isStepCountingAvailable(), steps == nil else { return }
-        let start = Calendar.current.startOfDay(for: Date())
-        motion.queryPedometerData(from: start, to: Date()) { [weak self] data, _ in
-            Task { @MainActor in
-                if let data { self?.steps = data.numberOfSteps.doubleValue }
+    private func fetchLatest(
+        _ identifier: HKQuantityTypeIdentifier,
+        unit: HKUnit
+    ) async -> Double? {
+
+        guard let type = HKObjectType.quantityType(
+            forIdentifier: identifier
+        ) else {
+            return nil
+        }
+
+        return await withCheckedContinuation { continuation in
+            let sort = NSSortDescriptor(
+                key: HKSampleSortIdentifierEndDate,
+                ascending: false
+            )
+
+            let query = HKSampleQuery(
+                sampleType: type,
+                predicate: nil,
+                limit: 1,
+                sortDescriptors: [sort]
+            ) { _, samples, error in
+
+                guard error == nil,
+                      let sample = samples?.first as? HKQuantitySample
+                else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                continuation.resume(
+                    returning: sample.quantity.doubleValue(for: unit)
+                )
             }
+
+            healthStore.execute(query)
         }
     }
 
-    func value(_ number: Double?, suffix: String, decimals: Int = 0) -> String {
-        guard let number else { return "暂无数据" }
-        return "\(number.formatted(.number.precision(.fractionLength(decimals)))) \(suffix)"
+    private func fetchCumulative(
+        _ identifier: HKQuantityTypeIdentifier,
+        unit: HKUnit
+    ) async -> Double? {
+
+        guard let type = HKObjectType.quantityType(
+            forIdentifier: identifier
+        ) else {
+            return nil
+        }
+
+        let calendar = Calendar.current
+        let startOfDay = calendar.startOfDay(for: Date())
+
+        let predicate = HKQuery.predicateForSamples(
+            withStart: startOfDay,
+            end: Date(),
+            options: .strictStartDate
+        )
+
+        return await withCheckedContinuation { continuation in
+            let query = HKStatisticsQuery(
+                quantityType: type,
+                quantitySamplePredicate: predicate,
+                options: .cumulativeSum
+            ) { _, statistics, error in
+
+                guard error == nil,
+                      let quantity = statistics?.sumQuantity()
+                else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                continuation.resume(
+                    returning: quantity.doubleValue(for: unit)
+                )
+            }
+
+            healthStore.execute(query)
+        }
     }
 }
